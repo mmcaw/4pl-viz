@@ -228,7 +228,7 @@ col_add, col_note = st.columns([1, 2], vertical_alignment="center")
 with col_add:
     add_clicked = st.button("Add to plot", type="primary")
 with col_note:
-    st.caption("Adds only new columns. Concentrations must match existing concentrations (no new rows).")
+    st.caption("Adds only new columns. Concentrations are merged (new concentrations become new rows).")
 
 if add_clicked:
     try:
@@ -248,7 +248,6 @@ if add_clicked:
                 new_meta[internal] = col  # display name initial equals header
                 wide = wide.rename(columns={col: internal})
 
-            # Sort concentrations just to be nice
             wide = wide.sort_values("Concentration").reset_index(drop=True)
 
             st.session_state.wide_df = wide
@@ -256,37 +255,45 @@ if add_clicked:
             st.session_state.last_paste_error = None
             st.success(f"Added {len(new_meta)} series.")
         else:
-            wide = st.session_state.wide_df.copy()
+            wide_old = st.session_state.wide_df.copy()
 
-            # Validate concentrations match, and align order
-            conc_existing = wide["Concentration"].to_numpy()
-            conc_new = df_new["Concentration"].to_numpy()
+            # Outer join on Concentration to allow new concentrations (new rows)
+            wide_merged = pd.merge(
+                wide_old[["Concentration"]].copy(),
+                df_new[["Concentration"]].copy(),
+                on="Concentration",
+                how="outer",
+            ).sort_values("Concentration").reset_index(drop=True)
 
-            if len(conc_existing) != len(conc_new) or not np.allclose(
-                np.sort(conc_existing), np.sort(conc_new), rtol=0, atol=0
-            ):
-                raise ValueError(
-                    "Concentrations do not match existing data. This app only supports adding new columns (no new rows)."
-                )
+            # Bring over existing series columns (aligned by Concentration)
+            wide_old_idx = wide_old.set_index("Concentration")
+            wide_merged_idx = wide_merged.set_index("Concentration")
 
-            # Reindex new df to match existing concentration order
-            df_new_idxed = df_new.set_index("Concentration").reindex(wide["Concentration"]).reset_index()
+            for col in wide_old.columns:
+                if col == "Concentration":
+                    continue
+                wide_merged_idx[col] = wide_old_idx[col]
 
-            # Add only new signal columns
-            existing_internal = set(wide.columns)
+            # Add new series columns (aligned by Concentration)
+            df_new_idx = df_new.set_index("Concentration")
+
+            existing_internal = set(wide_merged_idx.columns) | {"Concentration"}
             added = 0
-            for col in df_new_idxed.columns[1:]:
+            for col in df_new.columns[1:]:
                 internal = make_unique_internal(existing_internal, col)
                 existing_internal.add(internal)
 
-                wide[internal] = df_new_idxed[col].to_numpy()
+                wide_merged_idx[internal] = df_new_idx[col]
                 st.session_state.series_meta[internal] = col
                 added += 1
 
-            st.session_state.wide_df = wide
+            # Back to a normal column for concentration
+            wide_final = wide_merged_idx.reset_index()
+
+            st.session_state.wide_df = wide_final
             st.session_state.last_paste_error = None
             if added > 0:
-                st.success(f"Added {added} new series.")
+                st.success(f"Added {added} new series (concentrations merged).")
             else:
                 st.info("No new series columns found to add.")
     except Exception as e:
